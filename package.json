@@ -1,0 +1,23 @@
+{
+  "name": "enroads-scenario-to-midi",
+  "version": "1.0.0",
+  "description": "Bidirectional MIDI bridge for the EN-ROADS climate simulator – maps every slider to a MIDI CC message (0–127) and lets MIDI controllers move the sliders in realtime.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "midi",
+    "enroads",
+    "puppeteer",
+    "ableton",
+    "climate"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@julusian/midi": "^3.6.1",
+    "puppeteer": "^24.40.0"
+  }
+}
