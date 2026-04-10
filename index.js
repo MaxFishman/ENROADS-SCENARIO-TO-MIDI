@@ -318,8 +318,11 @@ async function setSliderValue(sliderIndex, value) {
       ).set;
       nativeSetter.call(input, String(val));
 
-      // Dispatch both events so the framework and any plain-JS listeners both fire
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      // Dispatch both events so the framework and any plain-JS listeners both fire.
+      // InputEvent (rather than plain Event) is required for React-based apps like
+      // EN-ROADS to recognise the change as genuine user input and update dependent
+      // state (e.g. graphs in the split/mixing-desk view).
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
     },
     sliderIndex,
