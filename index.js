@@ -56,6 +56,14 @@ const indexToCc = new Map();
  */
 let updatingFromMidi = false;
 
+/**
+ * Any popup/pop-out pages opened by EN-ROADS (e.g. the mixing desk pop-out).
+ * We inject the same slider listeners into each popup so MIDI ↔ slider sync
+ * works there as well.
+ * @type {Set<import('puppeteer').Page>}
+ */
+const popupPages = new Set();
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -352,21 +360,55 @@ function attachMidiListener(input) {
 }
 
 // ---------------------------------------------------------------------------
+// Slider-change handler (shared between main page and popup pages)
+// ---------------------------------------------------------------------------
+
+/**
+ * Called whenever a slider value changes in any browser page (main or popup).
+ * Keeps the in-memory slider array in sync and sends the appropriate MIDI CC.
+ *
+ * @param {number} index  Zero-based slider index.
+ * @param {number} value  New slider value (native units).
+ */
+function handleSliderChange(index, value) {
+  if (updatingFromMidi) return; // Prevent feedback loop
+
+  const slider = sliders[index];
+  if (!slider) return;
+
+  // Keep our in-memory copy in sync
+  slider.value = value;
+
+  const cc = indexToCc.get(index);
+  if (cc === undefined) return;
+
+  const midiValue = valueToMidi(value, slider.min, slider.max);
+
+  console.log(
+    `[SLIDER]   "${slider.label}" = ${value}  →  CC${cc} = ${midiValue}`
+  );
+
+  if (midiOutput) {
+    // Control Change: [0xB0 | channel, controller, value]
+    midiOutput.sendMessage([0xb0 | config.midiChannel, cc, midiValue]);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Moving a slider from Node.js
 // ---------------------------------------------------------------------------
 
 /**
- * Set the value of a range input at position `sliderIndex` in the NodeList
- * returned by `querySelectorAll('input[type="range"]')`.
+ * Apply a slider value change to a single Puppeteer page.
+ * Uses the native property setter to bypass React/Angular's synthetic event
+ * system, then dispatches both `input` and `change` events.
  *
- * We must use the native property setter to bypass React/Angular's synthetic
- * event system, otherwise React will discard the change.
- *
+ * @param {import('puppeteer').Page} targetPage
  * @param {number} sliderIndex  Zero-based position in the NodeList.
  * @param {number} value        New value (in the slider's native units).
  */
-async function setSliderValue(sliderIndex, value) {
-  await page.evaluate(
+async function applySliderValueToPage(targetPage, sliderIndex, value) {
+  await targetPage.evaluate(
     (idx, val) => {
       const inputs = document.querySelectorAll('input[type="range"]');
       const input = inputs[idx];
@@ -385,6 +427,25 @@ async function setSliderValue(sliderIndex, value) {
     },
     sliderIndex,
     value
+  );
+}
+
+/**
+ * Set the value of a range input at position `sliderIndex` in every open page
+ * (main page and any popup/pop-out pages).
+ *
+ * @param {number} sliderIndex  Zero-based position in the NodeList.
+ * @param {number} value        New value (in the slider's native units).
+ */
+async function setSliderValue(sliderIndex, value) {
+  const pages = [page, ...popupPages];
+  await Promise.all(
+    pages.map((p) =>
+      applySliderValueToPage(p, sliderIndex, value).catch(() => {
+        // The popup may have been closed; remove it from the tracked set
+        popupPages.delete(p);
+      })
+    )
   );
 }
 
@@ -465,29 +526,7 @@ async function main() {
   // ------------------------------------------------------------------
   // 4. Expose the Node.js callback and inject browser-side listeners
   // ------------------------------------------------------------------
-  await page.exposeFunction('__onSliderChange', (index, value) => {
-    if (updatingFromMidi) return; // Prevent feedback loop
-
-    const slider = sliders[index];
-    if (!slider) return;
-
-    // Keep our in-memory copy in sync
-    slider.value = value;
-
-    const cc = indexToCc.get(index);
-    if (cc === undefined) return;
-
-    const midiValue = valueToMidi(value, slider.min, slider.max);
-
-    console.log(
-      `[SLIDER]   "${slider.label}" = ${value}  →  CC${cc} = ${midiValue}`
-    );
-
-    if (midiOutput) {
-      // Control Change: [0xB0 | channel, controller, value]
-      midiOutput.sendMessage([0xb0 | config.midiChannel, cc, midiValue]);
-    }
-  });
+  await page.exposeFunction('__onSliderChange', handleSliderChange);
 
   await injectSliderListeners();
 
@@ -509,7 +548,52 @@ async function main() {
   });
 
   // ------------------------------------------------------------------
-  // 6. Graceful shutdown
+  // 6. Handle popup / pop-out pages (e.g. the mixing desk pop-out).
+  //    Expose the slider-change callback and inject slider listeners so
+  //    MIDI ↔ slider sync works in every open window.
+  // ------------------------------------------------------------------
+  browser.on('targetcreated', async (target) => {
+    if (target.type() !== 'page') return;
+    let popupPage;
+    try {
+      popupPage = await target.page();
+    } catch {
+      return;
+    }
+    if (!popupPage || popupPage === page) return;
+
+    popupPages.add(popupPage);
+    popupPage.on('close', () => popupPages.delete(popupPage));
+
+    try {
+      await popupPage.exposeFunction('__onSliderChange', handleSliderChange);
+
+      // Wait for EN-ROADS sliders to appear in the popup (may take a moment)
+      await popupPage
+        .waitForSelector('input[type="range"]', { timeout: 15000 })
+        .catch(() => {}); // Popup may not contain sliders – that's fine
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // Inject the same browser-side event listeners used on the main page
+      await popupPage.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll('input[type="range"]'));
+        inputs.forEach((input, index) => {
+          const handler = (e) => window.__onSliderChange(index, parseFloat(e.target.value));
+          input.addEventListener('input', handler);
+          input.addEventListener('change', handler);
+        });
+      });
+
+      console.log('[PAGE]     Injected slider listeners into popup page.');
+    } catch (err) {
+      // Popup may have closed before we could inject
+      console.warn('[PAGE]     Could not inject into popup page:', err.message);
+      popupPages.delete(popupPage);
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // 7. Graceful shutdown
   // ------------------------------------------------------------------
   const shutdown = () => {
     console.log('\nShutting down…');
