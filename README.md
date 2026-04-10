@@ -94,6 +94,37 @@ All settings are controlled via environment variables:
 | `CC_OFFSET` | `1` | CC number assigned to the first discovered slider. |
 | `HEADLESS` | `false` | Set to `true` to hide the Chromium window. |
 | `ENROADS_URL` | `https://en-roads.climateinteractive.org/scenario.html?v=26.3.0` | EN-ROADS URL to load. |
+| `LABEL_OVERRIDES_FILE` | `labels.json` | Path to a JSON rename map (see below). Silently ignored if the file does not exist. |
+
+### Renaming sliders and graph labels
+
+Create a file called `labels.json` (or point `LABEL_OVERRIDES_FILE` at another
+path) containing a JSON object.  Each key is either:
+
+* the **original label** text discovered from the EN-ROADS page, or
+* a **`"cc:<N>"`** key (e.g. `"cc:1"`) to match by CC number.
+
+The value is the replacement name shown in console output and forwarded to your
+DAW's MIDI-learn labels.  `cc:` keys take priority over label keys when both
+match the same slider.
+
+```json
+{
+  "Coal": "Coal & Industry",
+  "Renewables": "Solar + Wind",
+  "cc:5": "Transport Mix"
+}
+```
+
+Copy `labels.example.json` to `labels.json` as a starting point:
+
+```bash
+cp labels.example.json labels.json
+# then edit labels.json to your liking
+```
+
+> `labels.json` is listed in `.gitignore` so your personal rename map is never
+> accidentally committed.
 
 ### Example – use a specific MIDI port
 

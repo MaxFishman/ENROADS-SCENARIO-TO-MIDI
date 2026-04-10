@@ -15,6 +15,10 @@
  *   CC_OFFSET          – First CC number assigned to sliders. Default: 1.
  *   HEADLESS           – Run Chromium headless ("true"/"false"). Default: false.
  *   ENROADS_URL        – Full URL to load. Defaults to v26.3.0.
+ *   LABEL_OVERRIDES_FILE – Path to a JSON file that maps original slider/graph
+ *                          labels (or "cc:<N>" keys) to custom display names.
+ *                          Defaults to "labels.json" in the working directory
+ *                          if that file exists; set to "" to disable.
  */
 
 module.exports = {
@@ -34,4 +38,14 @@ module.exports = {
   pageLoadTimeout: 60000,
   /** Milliseconds to wait for at least one slider to appear after page load. */
   sliderWaitTimeout: 30000,
+  /**
+   * Path to a JSON file of label overrides.
+   * Keys: original label string  OR  "cc:<N>" (e.g. "cc:1").
+   * Values: replacement display name.
+   * Defaults to "labels.json" in the current working directory when that file
+   * exists; set LABEL_OVERRIDES_FILE="" to disable auto-loading.
+   */
+  labelOverridesFile: process.env.LABEL_OVERRIDES_FILE !== undefined
+    ? process.env.LABEL_OVERRIDES_FILE
+    : 'labels.json',
 };
