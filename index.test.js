@@ -128,3 +128,76 @@ describe('round-trip accuracy', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// applyLabelOverrides
+// ---------------------------------------------------------------------------
+
+function applyLabelOverrides(sliderArr, overrides, ccOffset) {
+  if (!overrides || Object.keys(overrides).length === 0) return;
+  sliderArr.forEach((slider, i) => {
+    const cc = ccOffset + i;
+    const ccKey = `cc:${cc}`;
+    if (Object.prototype.hasOwnProperty.call(overrides, ccKey)) {
+      slider.label = overrides[ccKey];
+    } else if (Object.prototype.hasOwnProperty.call(overrides, slider.label)) {
+      slider.label = overrides[slider.label];
+    }
+  });
+}
+
+describe('applyLabelOverrides', () => {
+  function makeSliders(labels) {
+    return labels.map((label, index) => ({ index, label, min: 0, max: 100, step: 1, value: 50 }));
+  }
+
+  it('renames by original label', () => {
+    const sliders = makeSliders(['Coal', 'Nuclear', 'Renewables']);
+    applyLabelOverrides(sliders, { Coal: 'Coal & Industry' }, 1);
+    assert.equal(sliders[0].label, 'Coal & Industry');
+    assert.equal(sliders[1].label, 'Nuclear');
+    assert.equal(sliders[2].label, 'Renewables');
+  });
+
+  it('renames by cc key', () => {
+    const sliders = makeSliders(['Coal', 'Nuclear', 'Renewables']);
+    applyLabelOverrides(sliders, { 'cc:3': 'My Renewables' }, 1);
+    assert.equal(sliders[0].label, 'Coal');
+    assert.equal(sliders[1].label, 'Nuclear');
+    assert.equal(sliders[2].label, 'My Renewables');
+  });
+
+  it('cc key takes priority over label key', () => {
+    const sliders = makeSliders(['Coal']);
+    applyLabelOverrides(sliders, { 'cc:1': 'By CC', Coal: 'By Label' }, 1);
+    assert.equal(sliders[0].label, 'By CC');
+  });
+
+  it('does nothing with empty overrides', () => {
+    const sliders = makeSliders(['Coal', 'Nuclear']);
+    applyLabelOverrides(sliders, {}, 1);
+    assert.equal(sliders[0].label, 'Coal');
+    assert.equal(sliders[1].label, 'Nuclear');
+  });
+
+  it('does nothing with null overrides', () => {
+    const sliders = makeSliders(['Coal']);
+    applyLabelOverrides(sliders, null, 1);
+    assert.equal(sliders[0].label, 'Coal');
+  });
+
+  it('respects ccOffset', () => {
+    const sliders = makeSliders(['A', 'B', 'C']);
+    applyLabelOverrides(sliders, { 'cc:10': 'Second' }, 9);
+    assert.equal(sliders[0].label, 'A');
+    assert.equal(sliders[1].label, 'Second');
+    assert.equal(sliders[2].label, 'C');
+  });
+
+  it('does not rename unmatched sliders', () => {
+    const sliders = makeSliders(['X', 'Y']);
+    applyLabelOverrides(sliders, { Z: 'Renamed', 'cc:99': 'Other' }, 1);
+    assert.equal(sliders[0].label, 'X');
+    assert.equal(sliders[1].label, 'Y');
+  });
+});

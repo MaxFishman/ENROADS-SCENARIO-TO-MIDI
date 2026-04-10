@@ -21,6 +21,7 @@
 
 const puppeteer = require('puppeteer');
 const midi = require('@julusian/midi');
+const fs = require('fs');
 const config = require('./config');
 
 // ---------------------------------------------------------------------------
@@ -90,6 +91,66 @@ function midiToValue(midiValue, min, max, step) {
     return Math.round(raw / step) * step;
   }
   return raw;
+}
+
+// ---------------------------------------------------------------------------
+// Label overrides (user-defined rename map)
+// ---------------------------------------------------------------------------
+
+/**
+ * Load the label-override map from the file path given in config.
+ * Returns an empty object when the file is absent or empty.
+ *
+ * File format – a plain JSON object whose keys are either:
+ *   • the original label text  (e.g. "Coal")
+ *   • a CC-number key          (e.g. "cc:1")
+ * and whose values are the desired replacement strings.
+ *
+ * @returns {Record<string, string>}
+ */
+function loadLabelOverrides() {
+  const filePath = config.labelOverridesFile;
+  if (!filePath) return {};
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const count = Object.keys(parsed).length;
+      if (count > 0) {
+        console.log(`[LABELS]   Loaded ${count} override(s) from "${filePath}"`);
+      } else {
+        console.log(`[LABELS]   "${filePath}" is empty – using auto-detected names.`);
+      }
+      return parsed;
+    }
+    console.warn(`[LABELS]   "${filePath}" must be a JSON object – ignoring.`);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn(`[LABELS]   Could not read "${filePath}": ${err.message}`);
+    }
+  }
+  return {};
+}
+
+/**
+ * Apply the label-override map to the discovered sliders array in-place.
+ * Matching priority: "cc:<N>" key first, then original-label key.
+ *
+ * @param {Array<{index:number, label:string, min:number, max:number, step:number, value:number}>} sliderArr
+ * @param {Record<string, string>} overrides
+ * @param {number} ccOffset  First CC number (mirrors config.ccOffset).
+ */
+function applyLabelOverrides(sliderArr, overrides, ccOffset) {
+  if (!overrides || Object.keys(overrides).length === 0) return;
+  sliderArr.forEach((slider, i) => {
+    const cc = ccOffset + i;
+    const ccKey = `cc:${cc}`;
+    if (Object.prototype.hasOwnProperty.call(overrides, ccKey)) {
+      slider.label = overrides[ccKey];
+    } else if (Object.prototype.hasOwnProperty.call(overrides, slider.label)) {
+      slider.label = overrides[slider.label];
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -381,9 +442,12 @@ async function main() {
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
   // ------------------------------------------------------------------
-  // 3. Discover sliders and assign CC numbers
+  // 3. Discover sliders, apply any user-defined label overrides, and
+  //    assign CC numbers
   // ------------------------------------------------------------------
   sliders = await discoverSliders();
+  const labelOverrides = loadLabelOverrides();
+  applyLabelOverrides(sliders, labelOverrides, config.ccOffset);
   console.log(`\nFound ${sliders.length} slider(s):\n`);
 
   sliders.forEach((s, i) => {
@@ -436,6 +500,7 @@ async function main() {
       await page.waitForSelector('input[type="range"]', { timeout: 10000 });
       await new Promise((resolve) => setTimeout(resolve, 1000));
       sliders = await discoverSliders();
+      applyLabelOverrides(sliders, labelOverrides, config.ccOffset);
       await injectSliderListeners();
       console.log(`[PAGE]     Re-injected listeners after navigation (${sliders.length} sliders)`);
     } catch {
