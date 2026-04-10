@@ -30,6 +30,11 @@ function midiToValue(midiValue, min, max, step) {
   return raw;
 }
 
+function extractNumber(text) {
+  const match = String(text).match(/[-+]?\d+(\.\d+)?/);
+  return match ? parseFloat(match[0]) : NaN;
+}
+
 // ---------------------------------------------------------------------------
 // valueToMidi
 // ---------------------------------------------------------------------------
@@ -126,5 +131,84 @@ describe('round-trip accuracy', () => {
         `Round-trip failed for value ${v}: got ${recovered} (MIDI ${midi})`
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractNumber – parses numeric values from graph element text content
+// ---------------------------------------------------------------------------
+
+describe('extractNumber', () => {
+  it('parses a plain integer', () => {
+    assert.equal(extractNumber('42'), 42);
+  });
+
+  it('parses a float', () => {
+    assert.equal(extractNumber('2.4'), 2.4);
+  });
+
+  it('strips unit suffix (°C)', () => {
+    assert.equal(extractNumber('2.4°C'), 2.4);
+  });
+
+  it('strips unit suffix (ppm)', () => {
+    assert.equal(extractNumber('450 ppm'), 450);
+  });
+
+  it('handles a negative value', () => {
+    assert.equal(extractNumber('-3.5 m'), -3.5);
+  });
+
+  it('handles a positive sign', () => {
+    assert.equal(extractNumber('+1.2°C'), 1.2);
+  });
+
+  it('returns NaN for non-numeric text', () => {
+    assert.ok(isNaN(extractNumber('n/a')));
+  });
+
+  it('returns NaN for empty string', () => {
+    assert.ok(isNaN(extractNumber('')));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Graph metric scaling – valueToMidi applied to typical EN-ROADS output ranges
+// ---------------------------------------------------------------------------
+
+describe('graph metric scaling', () => {
+  it('maps minimum temperature to MIDI 0', () => {
+    // Temperature range 1.0–5.0 °C; min value → MIDI 0
+    assert.equal(valueToMidi(1.0, 1.0, 5.0), 0);
+  });
+
+  it('maps maximum temperature to MIDI 127', () => {
+    assert.equal(valueToMidi(5.0, 1.0, 5.0), 127);
+  });
+
+  it('maps mid-range temperature correctly', () => {
+    // 3.0 is midpoint of 1.0–5.0; (3-1)/(5-1)*127 = 63.5 → 64
+    assert.equal(valueToMidi(3.0, 1.0, 5.0), 64);
+  });
+
+  it('maps minimum CO₂ concentration to MIDI 0', () => {
+    assert.equal(valueToMidi(400, 400, 1000), 0);
+  });
+
+  it('maps maximum CO₂ concentration to MIDI 127', () => {
+    assert.equal(valueToMidi(1000, 400, 1000), 127);
+  });
+
+  it('maps mid-range CO₂ concentration correctly', () => {
+    // 700 is midpoint of 400–1000; (700-400)/600*127 = 63.5 → 64
+    assert.equal(valueToMidi(700, 400, 1000), 64);
+  });
+
+  it('clamps graph values below metric minimum to MIDI 0', () => {
+    assert.equal(valueToMidi(0.5, 1.0, 5.0), 0);
+  });
+
+  it('clamps graph values above metric maximum to MIDI 127', () => {
+    assert.equal(valueToMidi(6.0, 1.0, 5.0), 127);
   });
 });

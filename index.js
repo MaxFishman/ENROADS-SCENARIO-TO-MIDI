@@ -11,12 +11,14 @@
  * ---------
  *   Slider moved by user  →  MIDI CC message sent to the configured output port
  *   MIDI CC message received  →  corresponding slider moved in realtime
+ *   Output graph value changes  →  MIDI CC message sent (graph metrics are polled
+ *                                  every config.graphPollInterval milliseconds)
  *
  * Scaling
  * -------
- *   slider value  →  MIDI  :  round( (value - min) / (max - min) * 127 )
- *   MIDI  →  slider value  :  min + (midiValue / 127) * (max - min),
- *                              snapped to the nearest step
+ *   slider/graph value  →  MIDI  :  round( (value - min) / (max - min) * 127 )
+ *   MIDI  →  slider value        :  min + (midiValue / 127) * (max - min),
+ *                                   snapped to the nearest step
  */
 
 const puppeteer = require('puppeteer');
@@ -47,6 +49,21 @@ const ccToIndex = new Map();
 
 /** slider index  → cc */
 const indexToCc = new Map();
+
+/**
+ * Graph output metric state.  Each entry mirrors a config.graphMetrics entry
+ * and additionally tracks the last value sent as MIDI so we only emit a new
+ * message when the value actually changes.
+ *
+ * @type {Array<{index:number, name:string, selector:string, min:number, max:number, lastMidi:number|null}>}
+ */
+let graphs = [];
+
+/** graph metric index  → cc */
+const graphIndexToCc = new Map();
+
+/** Interval handle returned by setInterval for graph polling. */
+let graphPollTimer = null;
 
 /**
  * Guard flag: set to true while we are programmatically moving a slider so
@@ -90,6 +107,29 @@ function midiToValue(midiValue, min, max, step) {
     return Math.round(raw / step) * step;
   }
   return raw;
+}
+
+/**
+ * Regex that matches the leading number (integer or float, optionally signed)
+ * in a string that may have a trailing unit suffix (e.g. "2.4°C", "450 ppm").
+ *
+ * Defined once here and passed as a serialised source string into
+ * page.evaluate() so that both the Node.js helper and the browser-side code
+ * share exactly the same pattern.
+ */
+const NUMBER_PATTERN = /[-+]?\d+(\.\d+)?/;
+
+/**
+ * Extract the leading numeric value from a string that may contain unit
+ * suffixes (e.g. "2.4°C", "450 ppm", "-3.5 m").  Returns NaN if no number
+ * can be parsed.
+ *
+ * @param {string} text  Raw text content of a graph value element.
+ * @returns {number}
+ */
+function extractNumber(text) {
+  const match = String(text).match(NUMBER_PATTERN);
+  return match ? parseFloat(match[0]) : NaN;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +210,105 @@ async function injectSliderListeners() {
       input.addEventListener('change', handler);
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Graph output metric discovery and polling
+// ---------------------------------------------------------------------------
+
+/**
+ * Initialise the `graphs` array from config.graphMetrics.
+ * This does not touch the page; it simply sets up the tracking state.
+ */
+function initGraphMetrics() {
+  graphs = config.graphMetrics.map((metric, index) => ({
+    index,
+    name: metric.name,
+    selector: metric.selector,
+    min: metric.min,
+    max: metric.max,
+    lastMidi: null,
+  }));
+
+  graphs.forEach((g) => {
+    const cc = config.graphCcOffset + g.index;
+    graphIndexToCc.set(g.index, cc);
+  });
+}
+
+/**
+ * Read the current displayed value for every configured graph metric by
+ * evaluating querySelectorAll in the browser context.
+ *
+ * A selector may contain comma-separated alternatives (standard CSS); the
+ * first matching element's textContent is used.
+ *
+ * @returns {Promise<Array<number|null>>}  One entry per graph metric (null if
+ *   the element was not found or yields no parseable number).
+ */
+async function readGraphValues() {
+  return page.evaluate((metrics, patternSource) => {
+    const re = new RegExp(patternSource);
+    return metrics.map(({ selector }) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const text = el.textContent || el.innerText || '';
+      const match = text.match(re);
+      return match ? parseFloat(match[0]) : null;
+    });
+  }, graphs.map((g) => ({ selector: g.selector })), NUMBER_PATTERN.source);
+}
+
+/**
+ * Poll all configured graph output metrics once.  For each metric whose
+ * current value produces a different MIDI value than the last time it was
+ * sent, emit a MIDI CC message scaled to 0–127.
+ */
+async function pollGraphValues() {
+  let rawValues;
+  try {
+    rawValues = await readGraphValues();
+  } catch {
+    // Page may be navigating; skip this poll cycle
+    return;
+  }
+
+  rawValues.forEach((rawValue, i) => {
+    if (rawValue === null || isNaN(rawValue)) return;
+
+    const graph = graphs[i];
+    const midiValue = valueToMidi(rawValue, graph.min, graph.max);
+
+    if (midiValue === graph.lastMidi) return; // No change – nothing to send
+    graph.lastMidi = midiValue;
+
+    const cc = graphIndexToCc.get(i);
+    console.log(
+      `[GRAPH]    "${graph.name}" = ${rawValue}  →  CC${cc} = ${midiValue}`
+    );
+
+    if (midiOutput) {
+      midiOutput.sendMessage([0xb0 | config.midiChannel, cc, midiValue]);
+    }
+  });
+}
+
+/**
+ * Start the periodic graph-value polling loop.
+ */
+function startGraphPolling() {
+  if (graphPollTimer !== null) return; // Already running
+  graphPollTimer = setInterval(pollGraphValues, config.graphPollInterval);
+}
+
+/**
+ * Stop the periodic graph-value polling loop.
+ */
+function stopGraphPolling() {
+  if (graphPollTimer !== null) {
+    clearInterval(graphPollTimer);
+    graphPollTimer = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +475,7 @@ async function main() {
   console.log(`URL       : ${config.enroadsUrl}`);
   console.log(`Channel   : ${config.midiChannel + 1}`);
   console.log(`CC offset : ${config.ccOffset}`);
+  console.log(`Graph CC  : ${config.graphCcOffset}`);
   console.log(`Headless  : ${config.headless}`);
   console.log('');
 
@@ -399,6 +539,22 @@ async function main() {
   console.log('');
 
   // ------------------------------------------------------------------
+  // 3b. Set up graph output metrics
+  // ------------------------------------------------------------------
+  initGraphMetrics();
+  if (graphs.length > 0) {
+    console.log(`Graph output metrics (polled every ${config.graphPollInterval} ms):\n`);
+    graphs.forEach((g) => {
+      const cc = graphIndexToCc.get(g.index);
+      console.log(
+        `  CC${String(cc).padStart(3)}  "${g.name}"` +
+          `  [${g.min} – ${g.max}]  →  MIDI 0–127`
+      );
+    });
+    console.log('');
+  }
+
+  // ------------------------------------------------------------------
   // 4. Expose the Node.js callback and inject browser-side listeners
   // ------------------------------------------------------------------
   await page.exposeFunction('__onSliderChange', (index, value) => {
@@ -428,15 +584,26 @@ async function main() {
   await injectSliderListeners();
 
   // ------------------------------------------------------------------
-  // 5. Re-inject listeners if the SPA does a full navigation/re-render
+  // 5. Start graph output polling
+  // ------------------------------------------------------------------
+  if (graphs.length > 0) {
+    startGraphPolling();
+  }
+
+  // ------------------------------------------------------------------
+  // 6. Re-inject listeners if the SPA does a full navigation/re-render
   // ------------------------------------------------------------------
   page.on('framenavigated', async (frame) => {
     if (frame !== page.mainFrame()) return;
     try {
+      stopGraphPolling();
       await page.waitForSelector('input[type="range"]', { timeout: 10000 });
       await new Promise((resolve) => setTimeout(resolve, 1000));
       sliders = await discoverSliders();
       await injectSliderListeners();
+      // Reset graph last-sent state so all values are re-emitted after navigation
+      graphs.forEach((g) => { g.lastMidi = null; });
+      if (graphs.length > 0) startGraphPolling();
       console.log(`[PAGE]     Re-injected listeners after navigation (${sliders.length} sliders)`);
     } catch {
       // Page may have navigated away intentionally
@@ -444,10 +611,11 @@ async function main() {
   });
 
   // ------------------------------------------------------------------
-  // 6. Graceful shutdown
+  // 7. Graceful shutdown
   // ------------------------------------------------------------------
   const shutdown = () => {
     console.log('\nShutting down…');
+    stopGraphPolling();
     if (midiOutput) midiOutput.closePort();
     if (midiInput) midiInput.closePort();
     browser.close().finally(() => process.exit(0));
@@ -464,6 +632,9 @@ async function main() {
   console.log('Bridge is running.');
   console.log('→ Move sliders in EN-ROADS to send MIDI CC messages to your DAW.');
   console.log('→ Send MIDI CC messages from your DAW to move EN-ROADS sliders in realtime.');
+  if (graphs.length > 0) {
+    console.log('→ Graph output metrics are polled and sent as MIDI CC automatically.');
+  }
   console.log('   Press Ctrl+C to exit.\n');
 }
 
