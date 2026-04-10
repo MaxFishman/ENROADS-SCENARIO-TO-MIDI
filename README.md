@@ -95,11 +95,26 @@ All settings are controlled via environment variables:
 | `HEADLESS` | `false` | Set to `true` to hide the Chromium window. |
 | `ENROADS_URL` | `https://en-roads.climateinteractive.org/scenario.html?v=26.3.0` | EN-ROADS URL to load. |
 | `LABEL_OVERRIDES_FILE` | `labels.json` | Path to a JSON rename map (see below). Silently ignored if the file does not exist. |
+| `HTTP_PORT` | `3000` | Port for the built-in label-editor UI. Set to `0` to disable. |
 
-### Renaming sliders and graph labels
+### Admin UI – rename sliders from your browser
 
-Create a file called `labels.json` (or point `LABEL_OVERRIDES_FILE` at another
-path) containing a JSON object.  Each key is either:
+While the bridge is running, open **http://localhost:3000/** in any browser.
+You will see a table with every slider's CC number, its original EN-ROADS
+label, and an editable **Display name** field.
+
+* Change any name and click **Save changes** – the new labels take effect
+  immediately and are written to `labels.json` so they persist across restarts.
+* Click **Reset to defaults** to clear all overrides and revert to the
+  auto-detected EN-ROADS labels (also clears `labels.json`).
+
+> The server listens on `127.0.0.1` only, so it is not reachable from other
+> machines on your network.
+
+### Renaming sliders via the labels file
+
+Alternatively, create `labels.json` (or point `LABEL_OVERRIDES_FILE` at another
+path) by hand — the Admin UI reads and writes this same file.  Each key is either:
 
 * the **original label** text discovered from the EN-ROADS page, or
 * a **`"cc:<N>"`** key (e.g. `"cc:1"`) to match by CC number.
@@ -180,7 +195,11 @@ MIDI → slider : min + (midiValue / 127) × (max − min), snapped to step
 │  │  MIDI IN  ◄─┼───────┤                          │ │
 │  └─────────────┘       └──────────────────────────┘ │
 │         ▲ ▼                                         │
-└─────────┼─┼───────────────────────────────────────┘
+│                        ┌──────────────────────────┐ │
+│                        │  HTTP admin server       │ │
+│                        │  http://localhost:3000/  │ │
+│                        └──────────────────────────┘ │
+└─────────────────────────────────────────────────────┘
           │ │
    Virtual MIDI port
           │ │

@@ -134,21 +134,26 @@ describe('round-trip accuracy', () => {
 // ---------------------------------------------------------------------------
 
 function applyLabelOverrides(sliderArr, overrides, ccOffset) {
+  sliderArr.forEach((slider) => {
+    if (slider.originalLabel !== undefined) {
+      slider.label = slider.originalLabel;
+    }
+  });
   if (!overrides || Object.keys(overrides).length === 0) return;
   sliderArr.forEach((slider, i) => {
     const cc = ccOffset + i;
     const ccKey = `cc:${cc}`;
     if (Object.prototype.hasOwnProperty.call(overrides, ccKey)) {
       slider.label = overrides[ccKey];
-    } else if (Object.prototype.hasOwnProperty.call(overrides, slider.label)) {
-      slider.label = overrides[slider.label];
+    } else if (Object.prototype.hasOwnProperty.call(overrides, slider.originalLabel)) {
+      slider.label = overrides[slider.originalLabel];
     }
   });
 }
 
 describe('applyLabelOverrides', () => {
   function makeSliders(labels) {
-    return labels.map((label, index) => ({ index, label, min: 0, max: 100, step: 1, value: 50 }));
+    return labels.map((label, index) => ({ index, label, originalLabel: label, min: 0, max: 100, step: 1, value: 50 }));
   }
 
   it('renames by original label', () => {
@@ -199,5 +204,23 @@ describe('applyLabelOverrides', () => {
     applyLabelOverrides(sliders, { Z: 'Renamed', 'cc:99': 'Other' }, 1);
     assert.equal(sliders[0].label, 'X');
     assert.equal(sliders[1].label, 'Y');
+  });
+
+  it('resets to originalLabel when called again with different overrides', () => {
+    const sliders = makeSliders(['Coal', 'Nuclear']);
+    applyLabelOverrides(sliders, { Coal: 'First Name' }, 1);
+    assert.equal(sliders[0].label, 'First Name');
+    // Call again with different overrides – Coal should revert then get new name
+    applyLabelOverrides(sliders, { Coal: 'Second Name' }, 1);
+    assert.equal(sliders[0].label, 'Second Name');
+    assert.equal(sliders[1].label, 'Nuclear');
+  });
+
+  it('resets to originalLabel when called with empty overrides', () => {
+    const sliders = makeSliders(['Coal']);
+    applyLabelOverrides(sliders, { Coal: 'Renamed' }, 1);
+    assert.equal(sliders[0].label, 'Renamed');
+    applyLabelOverrides(sliders, {}, 1);
+    assert.equal(sliders[0].label, 'Coal');
   });
 });

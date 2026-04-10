@@ -22,6 +22,7 @@
 const puppeteer = require('puppeteer');
 const midi = require('@julusian/midi');
 const fs = require('fs');
+const http = require('http');
 const config = require('./config');
 
 // ---------------------------------------------------------------------------
@@ -135,20 +136,27 @@ function loadLabelOverrides() {
 /**
  * Apply the label-override map to the discovered sliders array in-place.
  * Matching priority: "cc:<N>" key first, then original-label key.
+ * Each slider's `label` is reset to `originalLabel` before overrides are
+ * applied so the function is safely idempotent.
  *
- * @param {Array<{index:number, label:string, min:number, max:number, step:number, value:number}>} sliderArr
+ * @param {Array<{index:number, label:string, originalLabel:string, min:number, max:number, step:number, value:number}>} sliderArr
  * @param {Record<string, string>} overrides
  * @param {number} ccOffset  First CC number (mirrors config.ccOffset).
  */
 function applyLabelOverrides(sliderArr, overrides, ccOffset) {
+  sliderArr.forEach((slider) => {
+    if (slider.originalLabel !== undefined) {
+      slider.label = slider.originalLabel;
+    }
+  });
   if (!overrides || Object.keys(overrides).length === 0) return;
   sliderArr.forEach((slider, i) => {
     const cc = ccOffset + i;
     const ccKey = `cc:${cc}`;
     if (Object.prototype.hasOwnProperty.call(overrides, ccKey)) {
       slider.label = overrides[ccKey];
-    } else if (Object.prototype.hasOwnProperty.call(overrides, slider.label)) {
-      slider.label = overrides[slider.label];
+    } else if (Object.prototype.hasOwnProperty.call(overrides, slider.originalLabel)) {
+      slider.label = overrides[slider.originalLabel];
     }
   });
 }
@@ -201,14 +209,18 @@ async function discoverSliders() {
     }
 
     const inputs = Array.from(document.querySelectorAll('input[type="range"]'));
-    return inputs.map((input, index) => ({
-      index,
-      label: findLabel(input, index),
-      min: parseFloat(input.min !== '' ? input.min : 0),
-      max: parseFloat(input.max !== '' ? input.max : 100),
-      step: parseFloat(input.step !== '' ? input.step : 1) || 0,
-      value: parseFloat(input.value !== '' ? input.value : 0),
-    }));
+    return inputs.map((input, index) => {
+      const label = findLabel(input, index);
+      return {
+        index,
+        label,
+        originalLabel: label,
+        min: parseFloat(input.min !== '' ? input.min : 0),
+        max: parseFloat(input.max !== '' ? input.max : 100),
+        step: parseFloat(input.step !== '' ? input.step : 1) || 0,
+        value: parseFloat(input.value !== '' ? input.value : 0),
+      };
+    });
   });
 }
 
@@ -389,6 +401,230 @@ async function setSliderValue(sliderIndex, value) {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP admin server
+// ---------------------------------------------------------------------------
+
+/** HTML page served at GET / */
+const ADMIN_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EN-ROADS Slider Labels</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f4f6f8; color: #1a1a2e; padding: 2rem; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    p.subtitle { color: #555; margin-bottom: 1.5rem; font-size: 0.9rem; }
+    table { width: 100%; border-collapse: collapse; background: #fff;
+            border-radius: 8px; overflow: hidden;
+            box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+    thead { background: #1a1a2e; color: #fff; }
+    th, td { padding: 0.6rem 0.9rem; text-align: left; font-size: 0.9rem; }
+    tbody tr:nth-child(even) { background: #f9fafb; }
+    td input[type="text"] { width: 100%; border: 1px solid #ccc; border-radius: 4px;
+                             padding: 0.3rem 0.5rem; font-size: 0.9rem; }
+    td input[type="text"]:focus { outline: none; border-color: #4a90e2; }
+    .actions { margin-top: 1.25rem; display: flex; gap: 0.75rem; align-items: center; }
+    button { padding: 0.55rem 1.4rem; border: none; border-radius: 5px; cursor: pointer;
+             font-size: 0.9rem; font-weight: 600; transition: opacity .15s; }
+    button:hover { opacity: .85; }
+    #saveBtn  { background: #2ecc71; color: #fff; }
+    #resetBtn { background: #e74c3c; color: #fff; }
+    #status { font-size: 0.85rem; padding: 0.4rem 0.8rem; border-radius: 4px; display: none; }
+    #status.ok  { display: inline-block; background: #d4edda; color: #155724; }
+    #status.err { display: inline-block; background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <h1>EN-ROADS Slider Labels</h1>
+  <p class="subtitle">Edit the display name for each slider, then click <strong>Save</strong>.</p>
+  <table>
+    <thead>
+      <tr><th>CC #</th><th>Original label</th><th>Display name</th></tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div class="actions">
+    <button id="saveBtn">Save changes</button>
+    <button id="resetBtn">Reset to defaults</button>
+    <span id="status"></span>
+  </div>
+  <script>
+    const tbody = document.getElementById('tbody');
+    const saveBtn = document.getElementById('saveBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const status = document.getElementById('status');
+
+    function showStatus(msg, isOk) {
+      status.textContent = msg;
+      status.className = isOk ? 'ok' : 'err';
+      setTimeout(() => { status.className = ''; }, 3000);
+    }
+
+    async function loadSliders() {
+      const res = await fetch('/api/sliders');
+      if (!res.ok) { showStatus('Failed to load sliders', false); return; }
+      const sliders = await res.json();
+      tbody.innerHTML = '';
+      sliders.forEach(s => {
+        const tr = document.createElement('tr');
+        tr.dataset.cc = s.cc;
+        tr.dataset.original = s.originalLabel;
+        tr.innerHTML =
+          '<td>' + s.cc + '</td>' +
+          '<td>' + escHtml(s.originalLabel) + '</td>' +
+          '<td><input type="text" value="' + escHtml(s.label) + '" placeholder="' + escHtml(s.originalLabel) + '"></td>';
+        tbody.appendChild(tr);
+      });
+    }
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    }
+
+    saveBtn.addEventListener('click', async () => {
+      const overrides = {};
+      tbody.querySelectorAll('tr').forEach(tr => {
+        const input = tr.querySelector('input');
+        const val = input.value.trim();
+        const orig = tr.dataset.original;
+        if (val && val !== orig) {
+          overrides[orig] = val;
+        }
+      });
+      const res = await fetch('/api/labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(overrides),
+      });
+      if (res.ok) {
+        showStatus('Saved!', true);
+        await loadSliders();
+      } else {
+        const err = await res.text();
+        showStatus('Error: ' + err, false);
+      }
+    });
+
+    resetBtn.addEventListener('click', async () => {
+      const res = await fetch('/api/labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (res.ok) {
+        showStatus('Reset to defaults!', true);
+        await loadSliders();
+      } else {
+        showStatus('Reset failed', false);
+      }
+    });
+
+    loadSliders();
+  </script>
+</body>
+</html>`;
+
+/**
+ * Start the HTTP admin server.
+ *
+ * @param {() => Array} getSliders  Returns the live sliders array.
+ * @param {(overrides: Record<string,string>) => void} setOverrides
+ *   Called with the new override map; must apply + persist.
+ */
+function startAdminServer(getSliders, setOverrides) {
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(ADMIN_HTML);
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/api/sliders') {
+      const sliderArr = getSliders();
+      const payload = sliderArr.map((s, i) => ({
+        cc: config.ccOffset + i,
+        label: s.label,
+        originalLabel: s.originalLabel,
+        min: s.min,
+        max: s.max,
+        step: s.step,
+        value: s.value,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/labels') {
+      const MAX_BODY = 1024 * 1024; // 1 MB
+      let body = '';
+      let bodySize = 0;
+      req.on('data', (chunk) => {
+        bodySize += chunk.length;
+        if (bodySize > MAX_BODY) {
+          req.destroy();
+          res.writeHead(413, { 'Content-Type': 'text/plain' });
+          res.end('Payload too large');
+          return;
+        }
+        body += chunk;
+      });
+      req.on('end', () => {
+        if (res.writableEnded) return;
+        let overrides;
+        try {
+          overrides = JSON.parse(body);
+          if (typeof overrides !== 'object' || Array.isArray(overrides) || overrides === null) {
+            throw new Error('Body must be a JSON object');
+          }
+          for (const [k, v] of Object.entries(overrides)) {
+            if (typeof k !== 'string' || typeof v !== 'string') {
+              throw new Error('All keys and values must be strings');
+            }
+          }
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end(`Invalid JSON: ${err.message}`);
+          return;
+        }
+
+        // Persist to file (best-effort)
+        const filePath = config.labelOverridesFile;
+        if (filePath) {
+          try {
+            fs.writeFileSync(filePath, JSON.stringify(overrides, null, 2) + '\n', 'utf8');
+            console.log(`[ADMIN]    Saved ${Object.keys(overrides).length} override(s) to "${filePath}"`);
+          } catch (err) {
+            console.warn(`[ADMIN]    Could not write "${filePath}": ${err.message}`);
+          }
+        }
+
+        // Apply in-memory
+        setOverrides(overrides);
+        console.log('[ADMIN]    Label overrides updated.');
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
+  });
+
+  server.listen(config.httpPort, '127.0.0.1', () => {
+    console.log(`[ADMIN]    Admin UI available at http://localhost:${config.httpPort}/`);
+  });
+
+  server.on('error', (err) => {
+    console.warn(`[ADMIN]    HTTP server error: ${err.message}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -446,7 +682,7 @@ async function main() {
   //    assign CC numbers
   // ------------------------------------------------------------------
   sliders = await discoverSliders();
-  const labelOverrides = loadLabelOverrides();
+  let labelOverrides = loadLabelOverrides();
   applyLabelOverrides(sliders, labelOverrides, config.ccOffset);
   console.log(`\nFound ${sliders.length} slider(s):\n`);
 
@@ -509,7 +745,20 @@ async function main() {
   });
 
   // ------------------------------------------------------------------
-  // 6. Graceful shutdown
+  // 6. HTTP admin UI – lets the user rename sliders from a browser
+  // ------------------------------------------------------------------
+  if (config.httpPort) {
+    startAdminServer(
+      () => sliders,
+      (newOverrides) => {
+        labelOverrides = newOverrides;
+        applyLabelOverrides(sliders, labelOverrides, config.ccOffset);
+      },
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // 7. Graceful shutdown
   // ------------------------------------------------------------------
   const shutdown = () => {
     console.log('\nShutting down…');
@@ -529,6 +778,9 @@ async function main() {
   console.log('Bridge is running.');
   console.log('→ Move sliders in EN-ROADS to send MIDI CC messages to your DAW.');
   console.log('→ Send MIDI CC messages from your DAW to move EN-ROADS sliders in realtime.');
+  if (config.httpPort) {
+    console.log(`→ Open http://localhost:${config.httpPort}/ to rename sliders from the browser.`);
+  }
   console.log('   Press Ctrl+C to exit.\n');
 }
 

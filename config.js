@@ -48,4 +48,12 @@ module.exports = {
   labelOverridesFile: process.env.LABEL_OVERRIDES_FILE !== undefined
     ? process.env.LABEL_OVERRIDES_FILE
     : 'labels.json',
+  /**
+   * Port for the built-in HTTP admin UI.
+   * Set HTTP_PORT=0 to disable the server entirely.
+   * Default: 3000.
+   */
+  httpPort: process.env.HTTP_PORT !== undefined
+    ? parseInt(process.env.HTTP_PORT, 10)
+    : 3000,
 };
